@@ -17,14 +17,12 @@
     "url": "https://github.com/manuelportelaneto/manuel-bot-backend/issues"
   },
   "homepage": "https://github.com/manuelportelaneto/manuel-bot-backend#readme",
-  "devDependencies": {
-    
-  },
   "dependencies": {
+    "@google-cloud/aiplatform": "^5.7.0",
     "@google/generative-ai": "^0.24.1",
     "@supabase/supabase-js": "^2.74.0",
     "cors": "^2.8.5",
-    "express": "^5.1.0",
-    "dotenv": "^17.2.3"
+    "dotenv": "^17.2.3",
+    "express": "^5.1.0"
   }
 }

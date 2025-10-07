@@ -1,58 +1,47 @@
 // index.js
 require('dotenv').config();
 const express = require('express');
-const { GoogleGenerativeAI } = require('@google/generative-ai');
-// const { createClient } = require('@supabase/supabase-js'); // Desativado por enquanto
+const { VertexAI } = require('@google-cloud/aiplatform');
+const { createClient } = require('@supabase/supabase-js');
 const cors = require('cors');
 const fs = require('fs');
 const path = require('path');
 
 const app = express();
 const port = process.env.PORT || 8080;
-
 app.use(express.json());
+app.use(cors({ origin: ['https://manuelportelaneto.cloudmatrix.com.br', 'http://localhost:3000', 'http://localhost:3001'] }));
 
-const corsOptions = {
-    origin: ['https://manuelportelaneto.cloudmatrix.com.br', 'http://localhost:3000', 'http://localhost:3001']
-};
-app.use(cors(corsOptions));
-
-// --- VALIDAÇÃO DAS VARIÁVEIS ---
-// Apenas um aviso, não mais um erro fatal
-if (!process.env.GEMINI_API_KEY) {
-    console.warn("AVISO: GEMINI_API_KEY não encontrada. A API da IA vai falhar.");
+// --- CORREÇÃO DA CONFIGURAÇÃO DA VERTEX AI ---
+const project = 'cloud-matrix-469819';
+const location = 'southamerica-east1'; // Usando a região que funcionou para você!
+let vertex_ai_client;
+try {
+  vertex_ai_client = new VertexAI({ project: project, location: location });
+} catch (e) {
+  console.error("ERRO ao inicializar VertexAI. As credenciais do Google Cloud estão configuradas?", e)
 }
 // ------------------------------------
 
-let genAI;
+let supabase;
 try {
-  genAI = new GoogleGenerativeAI(process.env.GEMINI_API_KEY);
-} catch (error) {
-  console.error("ERRO CRÍTICO: Falha ao inicializar GoogleGenerativeAI. A API Key está correta?", error);
-  // Não encerra o processo, mas a rota da API irá falhar com uma mensagem clara
+  supabase = createClient(process.env.SUPABASE_URL, process.env.SUPABASE_ANON_KEY);
+} catch(e) {
+  console.error("ERRO ao inicializar Supabase. As variáveis de ambiente estão corretas?", e);
 }
 
-let knowledgeBaseContent = '';
-try {
-    knowledgeBaseContent = fs.readFileSync(path.join(__dirname, 'knowledge_base.txt'), 'utf8');
-} catch (error) {
-    console.error('CRITICAL: Não foi possível carregar o arquivo knowledge_base.txt!', error);
-}
+
+let knowledgeBaseContent = fs.readFileSync(path.join(__dirname, 'knowledge_base.txt'), 'utf8');
 
 app.post('/api/chat', async (req, res) => {
-    // Garante que o genAI foi inicializado
-    if (!genAI) {
-      return res.status(500).json({ error: "O serviço de IA não está configurado corretamente." });
+    if (!vertex_ai_client || !supabase) {
+        return res.status(500).json({ error: "Serviço de backend não foi inicializado corretamente." });
     }
-
+  
     try {
-        const { history = [], question } = req.body;
-
-        if (!question) {
-            return res.status(400).json({ error: 'A propriedade "question" é obrigatória.' });
-        }
+        const { history = [], question, sessionId } = req.body;
         
-        // Unificando a base de conhecimento com as regras do bot
+        // Unificando seu prompt completo em uma variável
         const systemPrompt = `# USE AS INFORMAÇÕES A SEGUIR COMO SUA ÚNICA BASE DE CONHECIMENTO PARA RESPONDER AS PERGUNTAS DO VISITANTE.
         # NÃO FAÇA PESQUISAS EXTERNAS, NEM USE OUTRAS FONTES DE INFORMAÇÃO.
         # NEM PESQUISE NA INTERNET, NEM USE OUTRAS FONTES DE INFORMAÇÃO.
@@ -146,39 +135,44 @@ app.post('/api/chat', async (req, res) => {
         - Solução Técnica: Automação do fluxo de agendamento com N8N, integrando APIs como Google Calendar e serviços de email.
         - Impacto no Negócio: Eliminação de 90% do trabalho manual de agendamento, permitindo que a equipe focasse no atendimento ao cliente.
 
-        # FIM DAS INFORMAÇÕES
+        # FIM DAS INFORMAÇÕES 
+        
         ${knowledgeBaseContent}`;
-                
-        const model = genAI.getGenerativeModel({ model: "gemini-pro" });
-        const chatSession = model.startChat({
-            history: [
-                { role: "user", parts: [{ text: systemPrompt }] },
-                { role: "model", parts: [{ text: "Entendido. Sou o Manuel (bot) e estou pronto para ajudar." }] },
-                ...history,
-            ],
+
+        const generativeModel = vertex_ai_client.getGenerativeModel({
+            model: 'gemini-1.5-pro-preview-0409',
         });
 
-        const result = await chatSession.sendMessage(question);
-        const botResponse = result.response.text();
+        const chat = generativeModel.startChat({
+            history: history.map(msg => ({
+                role: msg.role === 'user' ? 'user' : 'model',
+                parts: msg.parts,
+            })),
+            // O system prompt (context) é enviado separadamente para modelos mais novos
+        });
+
+        const result = await chat.sendMessage([
+          // Injeta o system prompt em cada chamada como o primeiro contexto
+          { role: 'user', parts: [{ text: systemPrompt }] },
+          // Inclui a mensagem atual do usuário
+          { role: 'user', parts: [{ text: question }] },
+        ]);
+        
+        const botResponse = result.response.candidates[0].content.parts[0].text;
         
         const newHistory = [...history, { role: "user", parts: [{ text: question }] }, { role: "model", parts: [{ text: botResponse }] }];
 
-        // Log na Supabase desativado por enquanto
-        // supabase.from('chat_logs')...
+        // Reativa o log na Supabase
+        supabase.from('chat_logs').upsert({ session_id: sessionId, conversation: newHistory, updated_at: new Date() }).select().then();
         
         return res.status(200).json({ answer: botResponse, history: newHistory });
 
     } catch (error) {
         console.error("ERRO CRÍTICO NA ROTA /api/chat:", error);
-        return res.status(500).json({ error: "Ocorreu um erro interno ao se comunicar com a IA." });
+        return res.status(500).json({ error: "Ocorreu um erro interno ao se comunicar com a Vertex AI." });
     }
 });
 
-// A aplicação só inicia se tiver a knowledge base, um ponto crítico a menos.
-if (knowledgeBaseContent) {
-    app.listen(port, "0.0.0.0", () => { // Adicionado "0.0.0.0"
-        console.log(`Servidor do Manuel (bot) rodando na porta ${port} e escutando em todas as interfaces.`);
-    });
-} else {
-    console.error("SERVIDOR NÃO INICIADO: knowledge_base.txt não pôde ser carregado.");
-}
+app.listen(port, "0.0.0.0", () => {
+    console.log(`Servidor do Manuel (bot) rodando na porta ${port} e escutando em todas as interfaces.`);
+});
