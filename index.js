@@ -2,12 +2,11 @@
 require('dotenv').config();
 const express = require('express');
 const { GoogleGenerativeAI } = require('@google/generative-ai');
-const { createClient } = require('@supabase/supabase-js');
+// const { createClient } = require('@supabase/supabase-js'); // Desativado por enquanto
 const cors = require('cors');
 const fs = require('fs');
 const path = require('path');
 
-// --- INICIALIZAÇÃO E CONFIGURAÇÃO ---
 const app = express();
 const port = process.env.PORT || 8080;
 
@@ -18,36 +17,42 @@ const corsOptions = {
 };
 app.use(cors(corsOptions));
 
-// Verifica se as chaves de API estão carregadas
-if (!process.env.GEMINI_API_KEY || !process.env.SUPABASE_URL || !process.env.SUPABASE_ANON_KEY) {
-    console.error("ERRO CRÍTICO: Variáveis de ambiente não foram carregadas. Verifique seu arquivo .env");
-    process.exit(1); // Encerra a aplicação se as chaves não existirem
+// --- VALIDAÇÃO DAS VARIÁVEIS ---
+// Apenas um aviso, não mais um erro fatal
+if (!process.env.GEMINI_API_KEY) {
+    console.warn("AVISO: GEMINI_API_KEY não encontrada. A API da IA vai falhar.");
+}
+// ------------------------------------
+
+let genAI;
+try {
+  genAI = new GoogleGenerativeAI(process.env.GEMINI_API_KEY);
+} catch (error) {
+  console.error("ERRO CRÍTICO: Falha ao inicializar GoogleGenerativeAI. A API Key está correta?", error);
+  // Não encerra o processo, mas a rota da API irá falhar com uma mensagem clara
 }
 
-const genAI = new GoogleGenerativeAI(process.env.GEMINI_API_KEY);
-const supabase = createClient(process.env.SUPABASE_URL, process.env.SUPABASE_ANON_KEY);
-
-// --- CORREÇÃO DA LEITURA DO ARQUIVO ---
-// Carrega a base de conhecimento do arquivo `knowledge_base.txt`
 let knowledgeBaseContent = '';
 try {
     knowledgeBaseContent = fs.readFileSync(path.join(__dirname, 'knowledge_base.txt'), 'utf8');
 } catch (error) {
     console.error('CRITICAL: Não foi possível carregar o arquivo knowledge_base.txt!', error);
 }
-// ------------------------------------
 
-// --- A ROTA PRINCIPAL DA API ---
 app.post('/api/chat', async (req, res) => {
-    try {
-        const { history = [], question, sessionId } = req.body;
+    // Garante que o genAI foi inicializado
+    if (!genAI) {
+      return res.status(500).json({ error: "O serviço de IA não está configurado corretamente." });
+    }
 
-        if (!question || !sessionId) {
-            return res.status(400).json({ error: 'Requisição inválida. "question" e "sessionId" são obrigatórios.' });
+    try {
+        const { history = [], question } = req.body;
+
+        if (!question) {
+            return res.status(400).json({ error: 'A propriedade "question" é obrigatória.' });
         }
         
-        // --- CORREÇÃO DO SYSTEM PROMPT ---
-        // Usa aspas ` (template literals) do JavaScript e injeta a base de conhecimento lida do arquivo
+        // Unificando a base de conhecimento com as regras do bot
         const systemPrompt = `# USE AS INFORMAÇÕES A SEGUIR COMO SUA ÚNICA BASE DE CONHECIMENTO PARA RESPONDER AS PERGUNTAS DO VISITANTE.
         # NÃO FAÇA PESQUISAS EXTERNAS, NEM USE OUTRAS FONTES DE INFORMAÇÃO.
         # NEM PESQUISE NA INTERNET, NEM USE OUTRAS FONTES DE INFORMAÇÃO.
@@ -143,8 +148,7 @@ app.post('/api/chat', async (req, res) => {
 
         # FIM DAS INFORMAÇÕES
         ${knowledgeBaseContent}`;
-        // ---------------------------------
-        
+                
         const model = genAI.getGenerativeModel({ model: "gemini-pro" });
         const chatSession = model.startChat({
             history: [
@@ -159,9 +163,8 @@ app.post('/api/chat', async (req, res) => {
         
         const newHistory = [...history, { role: "user", parts: [{ text: question }] }, { role: "model", parts: [{ text: botResponse }] }];
 
-        supabase.from('chat_logs').upsert({ session_id: sessionId, conversation: newHistory }).select().then(({error}) => {
-            if(error) console.error("Erro ao salvar log no Supabase:", error);
-        });
+        // Log na Supabase desativado por enquanto
+        // supabase.from('chat_logs')...
         
         return res.status(200).json({ answer: botResponse, history: newHistory });
 
@@ -171,7 +174,11 @@ app.post('/api/chat', async (req, res) => {
     }
 });
 
-// --- INICIALIZAÇÃO DO SERVIDOR ---
-app.listen(port, () => {
-    console.log(`Servidor do Manuel (bot) rodando na porta ${port}`);
-});
+// A aplicação só inicia se tiver a knowledge base, um ponto crítico a menos.
+if (knowledgeBaseContent) {
+    app.listen(port, "0.0.0.0", () => { // Adicionado "0.0.0.0"
+        console.log(`Servidor do Manuel (bot) rodando na porta ${port} e escutando em todas as interfaces.`);
+    });
+} else {
+    console.error("SERVIDOR NÃO INICIADO: knowledge_base.txt não pôde ser carregado.");
+}
