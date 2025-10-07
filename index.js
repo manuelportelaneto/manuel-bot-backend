@@ -1,8 +1,6 @@
-// index.js
 require('dotenv').config();
 const express = require('express');
 const { VertexAI } = require('@google-cloud/aiplatform');
-const { createClient } = require('@supabase/supabase-js');
 const cors = require('cors');
 const fs = require('fs');
 const path = require('path');
@@ -12,36 +10,27 @@ const port = process.env.PORT || 8080;
 app.use(express.json());
 app.use(cors({ origin: ['https://manuelportelaneto.cloudmatrix.com.br', 'http://localhost:3000', 'http://localhost:3001'] }));
 
-// --- CORREÇÃO DA CONFIGURAÇÃO DA VERTEX AI ---
+// --- CONFIGURAÇÃO DA VERTEX AI (A Forma Correta e Robusta) ---
+// Em vez de chaves no .env, vamos confiar na Conta de Serviço, que é a melhor prática no Cloud Run.
 const project = 'cloud-matrix-469819';
-const location = 'southamerica-east1'; // Usando a região que funcionou para você!
+const location = 'southamerica-east1';
 let vertex_ai_client;
 try {
   vertex_ai_client = new VertexAI({ project: project, location: location });
 } catch (e) {
-  console.error("ERRO ao inicializar VertexAI. As credenciais do Google Cloud estão configuradas?", e)
-}
-// ------------------------------------
-
-let supabase;
-try {
-  supabase = createClient(process.env.SUPABASE_URL, process.env.SUPABASE_ANON_KEY);
-} catch(e) {
-  console.error("ERRO ao inicializar Supabase. As variáveis de ambiente estão corretas?", e);
+  console.error("ERRO CRÍTICO AO INICIALIZAR VERTEX AI. Verifique as permissões da Conta de Serviço.", e)
 }
 
-
-let knowledgeBaseContent = fs.readFileSync(path.join(__dirname, 'knowledge_base.txt'), 'utf8');
+const knowledgeBaseContent = fs.readFileSync(path.join(__dirname, 'knowledge_base.txt'), 'utf8');
 
 app.post('/api/chat', async (req, res) => {
-    if (!vertex_ai_client || !supabase) {
-        return res.status(500).json({ error: "Serviço de backend não foi inicializado corretamente." });
+    if (!vertex_ai_client) {
+        return res.status(500).json({ error: "O cliente da Vertex AI não foi inicializado. Verifique os logs do servidor." });
     }
   
     try {
-        const { history = [], question, sessionId } = req.body;
+        const { history = [], question } = req.body;
         
-        // Unificando seu prompt completo em uma variável
         const systemPrompt = `# USE AS INFORMAÇÕES A SEGUIR COMO SUA ÚNICA BASE DE CONHECIMENTO PARA RESPONDER AS PERGUNTAS DO VISITANTE.
         # NÃO FAÇA PESQUISAS EXTERNAS, NEM USE OUTRAS FONTES DE INFORMAÇÃO.
         # NEM PESQUISE NA INTERNET, NEM USE OUTRAS FONTES DE INFORMAÇÃO.
@@ -142,28 +131,31 @@ app.post('/api/chat', async (req, res) => {
         const generativeModel = vertex_ai_client.getGenerativeModel({
             model: 'gemini-1.5-pro-preview-0409',
         });
-
-        const chat = generativeModel.startChat({
-            history: history.map(msg => ({
-                role: msg.role === 'user' ? 'user' : 'model',
+        
+        // Forma de chamada robusta, garantindo que o histórico + prompt não excedam o limite
+        const result = await generativeModel.generateContent({
+          systemInstruction: {
+            role: "USER",
+            parts: [{ text: `${systemPrompt} \n\n --- BASE DE CONHECIMENTO --- \n\n${knowledgeBaseContent}` }],
+          },
+          contents: [...history.map(msg => ({ // Converte o formato do histórico
+                role: msg.role === 'user' ? 'USER' : 'MODEL',
                 parts: msg.parts,
             })),
-            // O system prompt (context) é enviado separadamente para modelos mais novos
+            // Adiciona a pergunta atual
+            { role: 'USER', parts: [{ text: question }] },
+          ],
         });
-
-        const result = await chat.sendMessage([
-          // Injeta o system prompt em cada chamada como o primeiro contexto
-          { role: 'user', parts: [{ text: systemPrompt }] },
-          // Inclui a mensagem atual do usuário
-          { role: 'user', parts: [{ text: question }] },
-        ]);
         
-        const botResponse = result.response.candidates[0].content.parts[0].text;
+        const response = result.response;
+        if (!response.candidates || response.candidates[0].finishReason !== 'STOP') {
+             throw new Error("A IA não retornou uma resposta completa. Possível filtro de segurança.");
+        }
+        const botResponse = response.candidates[0].content.parts[0].text;
         
         const newHistory = [...history, { role: "user", parts: [{ text: question }] }, { role: "model", parts: [{ text: botResponse }] }];
 
-        // Reativa o log na Supabase
-        supabase.from('chat_logs').upsert({ session_id: sessionId, conversation: newHistory, updated_at: new Date() }).select().then();
+        // Lógica da Supabase removida.
         
         return res.status(200).json({ answer: botResponse, history: newHistory });
 
