@@ -14,7 +14,7 @@ const openai = new OpenAI({ apiKey: process.env.OPENAI_API_KEY });
 const ASSISTANT_ID = process.env.ASSISTANT_ID; // O ID do "Manuel (robô)"
 
 // --- A ROTA PRINCIPAL DA API ---
-app.post('/api/chat', async (req, res) => {
+app.post('/predict', async (req, res) => {
     try {
         const { question, threadId } = req.body; // Recebemos a pergunta e o ID do chat
         
