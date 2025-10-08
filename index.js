@@ -1,7 +1,7 @@
-// index.js (Versão Final com Gradio)
+// index.js
 require('dotenv').config();
 const express = require('express');
-const fetch = require('node-fetch');
+const OpenAI = require('openai');
 const cors = require('cors');
 
 const app = express();
@@ -9,52 +9,51 @@ const port = process.env.PORT || 8080;
 app.use(express.json());
 app.use(cors());
 
-const GRADIO_URL = process.env.GRADIO_API_URL;
-const VERTEX_API_KEY = process.env.VERTEX_API_KEY; 
+// --- INICIALIZAÇÃO E CONFIGURAÇÃO ---
+const openai = new OpenAI({ apiKey: process.env.OPENAI_API_KEY });
+const ASSISTANT_ID = process.env.ASSISTANT_ID; // O ID do "Manuel (robô)"
 
-// === A ROTA CORRETA É '/' ou uma rota que você defina.
-// Para simplificar, vamos usar uma rota explícita para evitar ambiguidades.
-app.post('/predict', async (req, res) => { // A ROTA MUDOU DE /api/chat PARA /predict
-    if (!GRADIO_URL || !VERTEX_API_KEY) {
-        return res.status(500).json({ error: "Configuração do servidor incompleta." });
-    }
-
+// --- A ROTA PRINCIPAL DA API ---
+app.post('/api/chat', async (req, res) => {
     try {
-        const { question, history = [] } = req.body;
+        const { question, threadId } = req.body; // Recebemos a pergunta e o ID do chat
         
-        // Adapta o payload para a API do Gradio/Vertex
-        const gradioPayload = {
-            data: [
-              question // A API Gradio espera a mensagem do usuário aqui
-            ]
-        };
+        // Se não houver threadId, significa que é a primeira mensagem de uma nova conversa.
+        // O OpenAI gerencia o histórico dentro do "Thread".
+        const currentThreadId = threadId || (await openai.beta.threads.create()).id;
         
-        // Chamada correta para a API Gradio (o /run/predict é o endpoint da API do Gradio)
-        const response = await fetch(`${GRADIO_URL}/run/predict`, {
-            method: 'POST',
-            headers: {
-                'Content-Type': 'application/json',
-                'Authorization': `Bearer ${VERTEX_API_KEY}`
-            },
-            body: JSON.stringify(gradioPayload)
+        // 1. Adiciona a mensagem do usuário ao Thread
+        await openai.beta.threads.messages.create(currentThreadId, {
+            role: "user",
+            content: question
         });
-        
-        if (!response.ok) {
-            throw new Error(`A API Gradio respondeu com erro ${response.status}`);
+
+        // 2. Executa o Assistente no Thread
+        const run = await openai.beta.threads.runs.create(currentThreadId, {
+            assistant_id: ASSISTANT_ID
+        });
+
+        // 3. Aguarda a conclusão da execução
+        let runStatus;
+        do {
+            await new Promise(resolve => setTimeout(resolve, 500)); // Espera 0.5s
+            runStatus = await openai.beta.threads.runs.retrieve(currentThreadId, run.id);
+        } while (runStatus.status === "running" || runStatus.status === "in_progress");
+
+        if (runStatus.status !== "completed") {
+            throw new Error(`A execução do assistente falhou com o status: ${runStatus.status}`);
         }
 
-        const result = await response.json();
+        // 4. Pega a última mensagem (a resposta do bot) do Thread
+        const messages = await openai.beta.threads.messages.list(currentThreadId);
+        const botResponse = messages.data[0].content[0].text.value;
         
-        // Extrai a resposta do bot da estrutura de dados do Gradio
-        const botResponse = result.data[0];
-        
-        const newHistory = [...history, { role: "user", parts: [{ text: question }] }, { role: "model", parts: [{ text: botResponse }] }];
-
-        return res.status(200).json({ answer: botResponse, history: newHistory });
+        // O frontend agora só precisa da resposta e do threadId para continuar a conversa
+        res.status(200).json({ answer: botResponse, threadId: currentThreadId });
 
     } catch (error) {
-        console.error("ERRO CRÍTICO NA ROTA:", error);
-        return res.status(500).json({ error: "Ocorreu um erro interno ao se comunicar com o agente Gradio." });
+        console.error("ERRO CRÍTICO NA ROTA /api/chat:", error);
+        res.status(500).json({ error: "Ocorreu um erro interno ao se comunicar com a OpenAI." });
     }
 });
 
