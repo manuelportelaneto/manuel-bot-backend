@@ -17,27 +17,23 @@ app.post('/api/chat', async (req, res) => {
     try {
         let { question, threadId } = req.body;
         
-        // Se não houver threadId, cria uma nova. A 'threadId' é a nossa memória de conversa.
         if (!threadId) {
             const thread = await openai.beta.threads.create();
             threadId = thread.id;
         }
 
-        // Adiciona a mensagem do usuário à thread existente
         await openai.beta.threads.messages.create(threadId, {
             role: "user",
             content: question
         });
 
-        // Executa o Assistente
         const run = await openai.beta.threads.runs.create(threadId, {
             assistant_id: ASSISTANT_ID
         });
 
-        // Aguarda a conclusão da execução do assistente
         let runStatus = await openai.beta.threads.runs.retrieve(threadId, run.id);
-        while (runStatus.status === "in_progress" || runStatus.status === 'queued' || runStatus.status === 'running') {
-            await new Promise(resolve => setTimeout(resolve, 300)); // Espera
+        while (runStatus.status === "in_progress" || runStatus.status === 'queued') {
+            await new Promise(resolve => setTimeout(resolve, 300));
             runStatus = await openai.beta.threads.runs.retrieve(threadId, run.id);
         }
         
@@ -45,13 +41,9 @@ app.post('/api/chat', async (req, res) => {
             throw new Error(`A execução falhou com o status: ${runStatus.status}`);
         }
 
-        // Pega as mensagens da thread, que agora incluem a resposta do bot
         const messages = await openai.beta.threads.messages.list(threadId);
-        
-        // A última mensagem é a do bot
         const botResponse = messages.data[0].content[0].text.value;
         
-        // Retorna a resposta e a threadId para o frontend
         res.status(200).json({ answer: botResponse, threadId: threadId });
 
     } catch (error) {
