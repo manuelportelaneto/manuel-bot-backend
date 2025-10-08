@@ -1,4 +1,4 @@
-// index.js
+// index.js (A VERSÃO FINAL DA VITÓRIA ABSOLUTA)
 require('dotenv').config();
 const express = require('express');
 const OpenAI = require('openai');
@@ -9,47 +9,50 @@ const port = process.env.PORT || 8080;
 app.use(express.json());
 app.use(cors());
 
-// --- INICIALIZAÇÃO E CONFIGURAÇÃO ---
+// --- INICIALIZAÇÃO ---
 const openai = new OpenAI({ apiKey: process.env.OPENAI_API_KEY });
-const ASSISTANT_ID = process.env.ASSISTANT_ID; // O ID do "Manuel (robô)"
+const ASSISTANT_ID = process.env.ASSISTANT_ID;
 
-// --- A ROTA PRINCIPAL DA API ---
-app.post('/predict', async (req, res) => {
+app.post('/api/chat', async (req, res) => {
     try {
-        const { question, threadId } = req.body; // Recebemos a pergunta e o ID do chat
+        let { question, threadId } = req.body;
         
-        // Se não houver threadId, significa que é a primeira mensagem de uma nova conversa.
-        // O OpenAI gerencia o histórico dentro do "Thread".
-        const currentThreadId = threadId || (await openai.beta.threads.create()).id;
-        
-        // 1. Adiciona a mensagem do usuário ao Thread
-        await openai.beta.threads.messages.create(currentThreadId, {
+        // Se não houver threadId, cria uma nova. A 'threadId' é a nossa memória de conversa.
+        if (!threadId) {
+            const thread = await openai.beta.threads.create();
+            threadId = thread.id;
+        }
+
+        // Adiciona a mensagem do usuário à thread existente
+        await openai.beta.threads.messages.create(threadId, {
             role: "user",
             content: question
         });
 
-        // 2. Executa o Assistente no Thread
-        const run = await openai.beta.threads.runs.create(currentThreadId, {
+        // Executa o Assistente
+        const run = await openai.beta.threads.runs.create(threadId, {
             assistant_id: ASSISTANT_ID
         });
 
-        // 3. Aguarda a conclusão da execução
-        let runStatus;
-        do {
-            await new Promise(resolve => setTimeout(resolve, 500)); // Espera 0.5s
-            runStatus = await openai.beta.threads.runs.retrieve(currentThreadId, run.id);
-        } while (runStatus.status === "running" || runStatus.status === "in_progress");
-
+        // Aguarda a conclusão da execução do assistente
+        let runStatus = await openai.beta.threads.runs.retrieve(threadId, run.id);
+        while (runStatus.status === "in_progress" || runStatus.status === 'queued' || runStatus.status === 'running') {
+            await new Promise(resolve => setTimeout(resolve, 300)); // Espera
+            runStatus = await openai.beta.threads.runs.retrieve(threadId, run.id);
+        }
+        
         if (runStatus.status !== "completed") {
-            throw new Error(`A execução do assistente falhou com o status: ${runStatus.status}`);
+            throw new Error(`A execução falhou com o status: ${runStatus.status}`);
         }
 
-        // 4. Pega a última mensagem (a resposta do bot) do Thread
-        const messages = await openai.beta.threads.messages.list(currentThreadId);
+        // Pega as mensagens da thread, que agora incluem a resposta do bot
+        const messages = await openai.beta.threads.messages.list(threadId);
+        
+        // A última mensagem é a do bot
         const botResponse = messages.data[0].content[0].text.value;
         
-        // O frontend agora só precisa da resposta e do threadId para continuar a conversa
-        res.status(200).json({ answer: botResponse, threadId: currentThreadId });
+        // Retorna a resposta e a threadId para o frontend
+        res.status(200).json({ answer: botResponse, threadId: threadId });
 
     } catch (error) {
         console.error("ERRO CRÍTICO NA ROTA /api/chat:", error);
