@@ -1,57 +1,54 @@
-// index.js (A VERSÃO FINAL DA VITÓRIA ABSOLUTA)
 require('dotenv').config();
 const express = require('express');
-const OpenAI = require('openai');
+const { GoogleGenerativeAI } = require('@google/generative-ai');
 const cors = require('cors');
+const fs = require('fs');
+const path = require('path');
 
 const app = express();
-const port = process.env.PORT || 8080;
+const port = process.env.PORT || 10000;
 app.use(express.json());
 app.use(cors());
 
-// --- INICIALIZAÇÃO ---
-const openai = new OpenAI({ apiKey: process.env.OPENAI_API_KEY });
-const ASSISTANT_ID = process.env.ASSISTANT_ID;
+// --- INICIALIZAÇÃO E VERIFICAÇÃO ---
+if (!process.env.GEMINI_API_KEY) {
+    console.error("ERRO: A variável de ambiente GEMINI_API_KEY não foi definida.");
+    process.exit(1);
+}
+const genAI = new GoogleGenerativeAI(process.env.GEMINI_API_KEY);
+const knowledgeBaseContent = fs.readFileSync(path.join(__dirname, 'knowledge_base.txt'), 'utf8');
+// ------------------------------------
 
 app.post('/api/chat', async (req, res) => {
     try {
-        let { question, threadId } = req.body;
-        
-        if (!threadId) {
-            const thread = await openai.beta.threads.create();
-            threadId = thread.id;
-        }
+        const { history = [], question } = req.body;
 
-        await openai.beta.threads.messages.create(threadId, {
-            role: "user",
-            content: question
+        const systemPrompt = `[COPIE SEU PROMPT DETALHADO AQUI] \n\n Base de Conhecimento: \n${knowledgeBaseContent}`;
+        
+        const model = genAI.getGenerativeModel({ model: "gemini-pro" });
+        const chat = model.startChat({
+            history: [
+                { role: "user", parts: [{ text: systemPrompt }] },
+                { role: "model", parts: [{ text: "Entendido." }] },
+                ...history,
+            ],
         });
-
-        const run = await openai.beta.threads.runs.create(threadId, {
-            assistant_id: ASSISTANT_ID
-        });
-
-        let runStatus = await openai.beta.threads.runs.retrieve(threadId, run.id);
-        while (runStatus.status === "in_progress" || runStatus.status === 'queued') {
-            await new Promise(resolve => setTimeout(resolve, 300));
-            runStatus = await openai.beta.threads.runs.retrieve(threadId, run.id);
-        }
         
-        if (runStatus.status !== "completed") {
-            throw new Error(`A execução falhou com o status: ${runStatus.status}`);
-        }
-
-        const messages = await openai.beta.threads.messages.list(threadId);
-        const botResponse = messages.data[0].content[0].text.value;
+        const result = await chat.sendMessage(question);
+        const botResponse = result.response.text();
         
-        res.status(200).json({ answer: botResponse, threadId: threadId });
+        const newHistory = [...history, { role: "user", parts: [{ text: question }] }, { role: "model", parts: [{ text: botResponse }] }];
+        
+        // Lógica de Supabase desativada por simplicidade
+        
+        return res.status(200).json({ answer: botResponse, history: newHistory });
 
     } catch (error) {
-        console.error("ERRO CRÍTICO NA ROTA /api/chat:", error);
-        res.status(500).json({ error: "Ocorreu um erro interno ao se comunicar com a OpenAI." });
+        console.error("ERRO CRÍTICO NA ROTA /api/chat:", error.message);
+        return res.status(500).json({ error: "Ocorreu um erro ao se comunicar com a IA do Gemini." });
     }
 });
 
-app.listen(port, "0.0.0.0", () => {
-    console.log(`Servidor do Manuel (bot) rodando na porta ${port}.`);
+app.listen(port, () => {
+    console.log(`Servidor do 'Manuel (bot)' rodando na porta ${port}.`);
 });
