@@ -1,4 +1,4 @@
-// index.js (A VERSÃO CORRETA E FINAL)
+// index.js (A VERSÃO FINAL. A DA VITÓRIA.)
 require('dotenv').config();
 const express = require('express');
 const OpenAI = require('openai');
@@ -21,7 +21,6 @@ app.post('/api/chat', async (req, res) => {
     try {
         let { question, threadId } = req.body;
         
-        // A LÓGICA DA VITÓRIA: Cria a thread se ela não existir
         if (!threadId) {
             const thread = await openai.beta.threads.create();
             threadId = thread.id;
@@ -31,25 +30,26 @@ app.post('/api/chat', async (req, res) => {
             role: "user",
             content: question
         });
-
-        const run = await openai.beta.threads.runs.create(threadId, {
-            assistant_id: ASSISTANT_ID
-        });
-
-        let runStatus;
-        do {
-            await new Promise(resolve => setTimeout(resolve, 500));
-            runStatus = await openai.beta.threads.runs.retrieve(threadId, run.id);
-        } while (runStatus.status === "in_progress" || runStatus.status === "running" || runStatus.status === "queued");
         
-        if (runStatus.status !== "completed") {
-            throw new Error(`A execução do assistente falhou com o status: ${runStatus.status}`);
+        // --- A CORREÇÃO FINAL DA LÓGICA DE EXECUÇÃO (RUN) ---
+        // A documentação recomenda usar o método "createAndPoll" que faz tudo sozinho.
+        const run = await openai.beta.threads.runs.createAndPoll(
+            threadId, 
+            { assistant_id: ASSISTANT_ID }
+        );
+
+        // Se o status da execução final for "completed", prossiga.
+        if (run.status === 'completed') {
+            const messages = await openai.beta.threads.messages.list(run.thread_id);
+            // Itera pelas mensagens para encontrar a última resposta do assistente
+            const botResponse = messages.data.find(msg => msg.role === 'assistant').content[0].text.value;
+            
+            return res.status(200).json({ answer: botResponse, threadId: run.thread_id });
+        } else {
+            // Lança um erro se a execução falhou por qualquer outro motivo (expirou, cancelada, etc.)
+            throw new Error(`A execução do assistente falhou com o status: ${run.status}`);
         }
-
-        const messages = await openai.beta.threads.messages.list(threadId);
-        const botResponse = messages.data[0].content[0].text.value;
-        
-        return res.status(200).json({ answer: botResponse, threadId: threadId });
+        // --------------------------------------------------------
 
     } catch (error) {
         console.error("ERRO CRÍTICO NA ROTA /api/chat:", error);
